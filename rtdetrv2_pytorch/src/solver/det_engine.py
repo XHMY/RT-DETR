@@ -148,8 +148,14 @@ def evaluate(model: torch.nn.Module, criterion: torch.nn.Module, postprocessor, 
     if coco_evaluator is not None:
         if 'bbox' in iou_types:
             stats['coco_eval_bbox'] = coco_evaluator.coco_eval['bbox'].stats.tolist()
+            # Add IoU@0.1 stats if available
+            if hasattr(coco_evaluator, 'include_iou_10') and coco_evaluator.include_iou_10:
+                stats['coco_eval_bbox_iou10'] = coco_evaluator.coco_eval_iou10['bbox'].stats
         if 'segm' in iou_types:
             stats['coco_eval_masks'] = coco_evaluator.coco_eval['segm'].stats.tolist()
+            # Add IoU@0.1 stats for segmentation if available
+            if hasattr(coco_evaluator, 'include_iou_10') and coco_evaluator.include_iou_10:
+                stats['coco_eval_masks_iou10'] = coco_evaluator.coco_eval_iou10['segm'].stats
             
     return stats, coco_evaluator
 

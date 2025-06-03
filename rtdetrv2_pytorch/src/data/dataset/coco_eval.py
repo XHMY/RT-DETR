@@ -23,26 +23,47 @@ __all__ = ['CocoEvaluator',]
 
 @register()
 class CocoEvaluator(object):
-    def __init__(self, coco_gt, iou_types):
+    def __init__(self, coco_gt, iou_types, include_iou_10=True):
         assert isinstance(iou_types, (list, tuple))
         coco_gt = copy.deepcopy(coco_gt)
         self.coco_gt : COCO = coco_gt
         self.iou_types = iou_types
+        self.include_iou_10 = include_iou_10
 
         self.coco_eval = {}
         for iou_type in iou_types:
             self.coco_eval[iou_type] = COCOeval_faster(coco_gt, iouType=iou_type, print_function=print, separate_eval=True)
 
+        # Create separate evaluator for IoU@0.1 if requested
+        if self.include_iou_10:
+            self.coco_eval_iou10 = {}
+            for iou_type in iou_types:
+                eval_instance = COCOeval_faster(coco_gt, iouType=iou_type, print_function=print, separate_eval=True)
+                # Set IoU threshold to 0.1
+                eval_instance.params.iouThrs = np.array([0.1])
+                self.coco_eval_iou10[iou_type] = eval_instance
+
         self.img_ids = []
         self.eval_imgs = {k: [] for k in iou_types}
+        if self.include_iou_10:
+            self.eval_imgs_iou10 = {k: [] for k in iou_types}
 
     def cleanup(self):
         self.coco_eval = {}
         for iou_type in self.iou_types:
             self.coco_eval[iou_type] = COCOeval_faster(self.coco_gt, iouType=iou_type, print_function=print, separate_eval=True)
+        
+        if self.include_iou_10:
+            self.coco_eval_iou10 = {}
+            for iou_type in self.iou_types:
+                eval_instance = COCOeval_faster(self.coco_gt, iouType=iou_type, print_function=print, separate_eval=True)
+                eval_instance.params.iouThrs = np.array([0.1])
+                self.coco_eval_iou10[iou_type] = eval_instance
+                
         self.img_ids = []
         self.eval_imgs = {k: [] for k in self.iou_types}
-
+        if self.include_iou_10:
+            self.eval_imgs_iou10 = {k: [] for k in self.iou_types}
 
     def update(self, predictions):
         img_ids = list(np.unique(list(predictions.keys())))
@@ -50,8 +71,9 @@ class CocoEvaluator(object):
 
         for iou_type in self.iou_types:
             results = self.prepare(predictions, iou_type)
+            
+            # Standard COCO evaluation
             coco_eval = self.coco_eval[iou_type]
-
             with open(os.devnull, 'w') as devnull:
                 with contextlib.redirect_stdout(devnull):
                     coco_dt = self.coco_gt.loadRes(results) if results else COCO()
@@ -61,23 +83,101 @@ class CocoEvaluator(object):
 
             self.eval_imgs[iou_type].append(np.array(coco_eval._evalImgs_cpp).reshape(len(coco_eval.params.catIds), len(coco_eval.params.areaRng), len(coco_eval.params.imgIds)))
 
+            # IoU@0.1 evaluation
+            if self.include_iou_10:
+                coco_eval_iou10 = self.coco_eval_iou10[iou_type]
+                with open(os.devnull, 'w') as devnull:
+                    with contextlib.redirect_stdout(devnull):
+                        coco_dt_iou10 = self.coco_gt.loadRes(results) if results else COCO()
+                        coco_eval_iou10.cocoDt = coco_dt_iou10
+                        coco_eval_iou10.params.imgIds = list(img_ids)
+                        coco_eval_iou10.evaluate()
+
+                self.eval_imgs_iou10[iou_type].append(np.array(coco_eval_iou10._evalImgs_cpp).reshape(len(coco_eval_iou10.params.catIds), len(coco_eval_iou10.params.areaRng), len(coco_eval_iou10.params.imgIds)))
+
     def synchronize_between_processes(self):
         for iou_type in self.iou_types:
+            # Standard evaluation
             img_ids, eval_imgs = merge(self.img_ids, self.eval_imgs[iou_type])
-
             coco_eval = self.coco_eval[iou_type]
             coco_eval.params.imgIds = img_ids
             coco_eval._paramsEval = copy.deepcopy(coco_eval.params)
             coco_eval._evalImgs_cpp = eval_imgs
 
+            # IoU@0.1 evaluation
+            if self.include_iou_10:
+                _, eval_imgs_iou10 = merge(self.img_ids, self.eval_imgs_iou10[iou_type])
+                coco_eval_iou10 = self.coco_eval_iou10[iou_type]
+                coco_eval_iou10.params.imgIds = img_ids
+                coco_eval_iou10._paramsEval = copy.deepcopy(coco_eval_iou10.params)
+                coco_eval_iou10._evalImgs_cpp = eval_imgs_iou10
+
     def accumulate(self):
         for coco_eval in self.coco_eval.values():
             coco_eval.accumulate()
+        
+        if self.include_iou_10:
+            for coco_eval_iou10 in self.coco_eval_iou10.values():
+                coco_eval_iou10.accumulate()
 
     def summarize(self):
         for iou_type, coco_eval in self.coco_eval.items():
             print("IoU metric: {}".format(iou_type))
+            
+            # Standard COCO summarize
             coco_eval.summarize()
+            
+            # Add custom AP@0.1 evaluation if requested
+            if self.include_iou_10:
+                self._summarize_ap_at_iou_10(iou_type)
+
+    def _summarize_ap_at_iou_10(self, iou_type):
+        """
+        Add AP@0.1 and AR@0.1 evaluation using the dedicated IoU@0.1 evaluator
+        """
+        coco_eval_iou10 = self.coco_eval_iou10[iou_type]
+        
+        def _summarize_single_iou(ap=1, areaRng='all', maxDets=100):
+            p = coco_eval_iou10.params
+            iStr = ' {:<18} {} @[ IoU={:<9} | area={:>6s} | maxDets={:>3d} ] = {:0.3f}'
+            titleStr = 'Average Precision' if ap == 1 else 'Average Recall'
+            typeStr = '(AP)' if ap == 1 else '(AR)'
+            iouStr = '0.10'
+
+            aind = [i for i, aRng in enumerate(p.areaRngLbl) if aRng == areaRng]
+            mind = [i for i, mDet in enumerate(p.maxDets) if mDet == maxDets]
+            
+            if ap == 1:
+                # dimension of precision: [TxRxKxAxM] - for IoU@0.1, T=1
+                s = coco_eval_iou10.eval['precision']
+                s = s[0, :, :, aind, mind]  # Take the first (and only) IoU threshold
+            else:
+                # dimension of recall: [TxKxAxM] - for IoU@0.1, T=1
+                s = coco_eval_iou10.eval['recall']
+                s = s[0, :, aind, mind]  # Take the first (and only) IoU threshold
+            
+            if len(s[s > -1]) == 0:
+                mean_s = -1
+            else:
+                mean_s = np.mean(s[s > -1])
+            
+            print(iStr.format(titleStr, typeStr, iouStr, areaRng, maxDets, mean_s))
+            return mean_s
+
+        # Compute AP@0.1 for different area ranges
+        print(" Custom IoU@0.1 evaluation:")
+        _summarize_single_iou(1, areaRng='all', maxDets=coco_eval_iou10.params.maxDets[2])
+        _summarize_single_iou(1, areaRng='small', maxDets=coco_eval_iou10.params.maxDets[2])
+        _summarize_single_iou(1, areaRng='medium', maxDets=coco_eval_iou10.params.maxDets[2])
+        _summarize_single_iou(1, areaRng='large', maxDets=coco_eval_iou10.params.maxDets[2])
+        
+        # Compute AR@0.1 for different maxDets and area ranges
+        _summarize_single_iou(0, areaRng='all', maxDets=coco_eval_iou10.params.maxDets[0])  # maxDets=1
+        _summarize_single_iou(0, areaRng='all', maxDets=coco_eval_iou10.params.maxDets[1])  # maxDets=10
+        _summarize_single_iou(0, areaRng='all', maxDets=coco_eval_iou10.params.maxDets[2])  # maxDets=100
+        _summarize_single_iou(0, areaRng='small', maxDets=coco_eval_iou10.params.maxDets[2])
+        _summarize_single_iou(0, areaRng='medium', maxDets=coco_eval_iou10.params.maxDets[2])
+        _summarize_single_iou(0, areaRng='large', maxDets=coco_eval_iou10.params.maxDets[2])
 
     def prepare(self, predictions, iou_type):
         if iou_type == "bbox":

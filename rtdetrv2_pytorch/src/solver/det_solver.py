@@ -63,55 +63,76 @@ class DetSolver(BaseSolver):
                 for checkpoint_path in checkpoint_paths:
                     dist_utils.save_on_master(self.state_dict(), checkpoint_path)
 
-            module = self.ema.module if self.ema else self.model
-            test_stats, coco_evaluator = evaluate(
-                module, 
-                self.criterion, 
-                self.postprocessor, 
-                self.val_dataloader, 
-                self.evaluator, 
-                self.device
-            )
+            # Only run evaluation at specified frequency
+            if (epoch + 1) % args.evaluation_freq == 0:
+                module = self.ema.module if self.ema else self.model
+                test_stats, coco_evaluator = evaluate(
+                    module, 
+                    self.criterion, 
+                    self.postprocessor, 
+                    self.val_dataloader, 
+                    self.evaluator, 
+                    self.device
+                )
 
-            # TODO 
-            for k in test_stats:
-                if self.writer and dist_utils.is_main_process():
-                    for i, v in enumerate(test_stats[k]):
-                        self.writer.add_scalar(f'Test/{k}_{i}'.format(k), v, epoch)
-            
-                if k in best_stat:
-                    best_stat['epoch'] = epoch if test_stats[k][0] > best_stat[k] else best_stat['epoch']
-                    best_stat[k] = max(best_stat[k], test_stats[k][0])
-                else:
-                    best_stat['epoch'] = epoch
-                    best_stat[k] = test_stats[k][0]
+                # TODO 
+                for k in test_stats:
+                    if self.writer and dist_utils.is_main_process():
+                        for i, v in enumerate(test_stats[k]):
+                            self.writer.add_scalar(f'Test/{k}_{i}'.format(k), v, epoch)
+                
+                    # Handle different stat structures for IoU@0.1 vs standard COCO
+                    if 'iou10' in k:
+                        # For IoU@0.1 stats, use the first metric (AP@0.1) for best stat tracking
+                        metric_for_best = test_stats[k][0] if len(test_stats[k]) > 0 else 0.0
+                    else:
+                        # For standard COCO stats, use index 1 (AP@0.5) for best stat tracking
+                        metric_for_best = test_stats[k][1] if len(test_stats[k]) > 1 else 0.0
+                    
+                    if k in best_stat:
+                        best_stat['epoch'] = epoch if metric_for_best > best_stat[k] else best_stat['epoch']
+                        best_stat[k] = max(best_stat[k], metric_for_best)
+                    else:
+                        best_stat['epoch'] = epoch
+                        best_stat[k] = metric_for_best
 
-                if best_stat['epoch'] == epoch and self.output_dir:
-                    dist_utils.save_on_master(self.state_dict(), self.output_dir / 'best.pth')
+                    if best_stat['epoch'] == epoch and self.output_dir:
+                        dist_utils.save_on_master(self.state_dict(), self.output_dir / 'best.pth')
 
-            print(f'best_stat: {best_stat}')
+                print(f'best_stat: {best_stat}')
 
-            log_stats = {
-                **{f'train_{k}': v for k, v in train_stats.items()},
-                **{f'test_{k}': v for k, v in test_stats.items()},
-                'epoch': epoch,
-                'n_parameters': n_parameters
-            }
+                log_stats = {
+                    **{f'train_{k}': v for k, v in train_stats.items()},
+                    **{f'test_{k}': v for k, v in test_stats.items()},
+                    'epoch': epoch,
+                    'n_parameters': n_parameters
+                }
 
-            if self.output_dir and dist_utils.is_main_process():
-                with (self.output_dir / "log.txt").open("a") as f:
-                    f.write(json.dumps(log_stats) + "\n")
+                if self.output_dir and dist_utils.is_main_process():
+                    with (self.output_dir / "log.txt").open("a") as f:
+                        f.write(json.dumps(log_stats) + "\n")
 
-                # for evaluation logs
-                if coco_evaluator is not None:
-                    (self.output_dir / 'eval').mkdir(exist_ok=True)
-                    if "bbox" in coco_evaluator.coco_eval:
-                        filenames = ['latest.pth']
-                        if epoch % 50 == 0:
-                            filenames.append(f'{epoch:03}.pth')
-                        for name in filenames:
-                            torch.save(coco_evaluator.coco_eval["bbox"].eval,
-                                    self.output_dir / "eval" / name)
+                    # for evaluation logs
+                    if coco_evaluator is not None:
+                        (self.output_dir / 'eval').mkdir(exist_ok=True)
+                        if "bbox" in coco_evaluator.coco_eval:
+                            filenames = ['latest.pth']
+                            if epoch % 50 == 0:
+                                filenames.append(f'{epoch:03}.pth')
+                            for name in filenames:
+                                torch.save(coco_evaluator.coco_eval["bbox"].eval,
+                                        self.output_dir / "eval" / name)
+            else:
+                # Log training stats only when evaluation is skipped
+                log_stats = {
+                    **{f'train_{k}': v for k, v in train_stats.items()},
+                    'epoch': epoch,
+                    'n_parameters': n_parameters
+                }
+
+                if self.output_dir and dist_utils.is_main_process():
+                    with (self.output_dir / "log.txt").open("a") as f:
+                        f.write(json.dumps(log_stats) + "\n")
 
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
