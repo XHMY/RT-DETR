@@ -164,20 +164,27 @@ class CocoEvaluator(object):
             print(iStr.format(titleStr, typeStr, iouStr, areaRng, maxDets, mean_s))
             return mean_s
 
-        # Compute AP@0.1 for different area ranges
+        # Compute and store AP@0.1 and AR@0.1 statistics
         print(" Custom IoU@0.1 evaluation:")
-        _summarize_single_iou(1, areaRng='all', maxDets=coco_eval_iou10.params.maxDets[2])
-        _summarize_single_iou(1, areaRng='small', maxDets=coco_eval_iou10.params.maxDets[2])
-        _summarize_single_iou(1, areaRng='medium', maxDets=coco_eval_iou10.params.maxDets[2])
-        _summarize_single_iou(1, areaRng='large', maxDets=coco_eval_iou10.params.maxDets[2])
         
-        # Compute AR@0.1 for different maxDets and area ranges
-        _summarize_single_iou(0, areaRng='all', maxDets=coco_eval_iou10.params.maxDets[0])  # maxDets=1
-        _summarize_single_iou(0, areaRng='all', maxDets=coco_eval_iou10.params.maxDets[1])  # maxDets=10
-        _summarize_single_iou(0, areaRng='all', maxDets=coco_eval_iou10.params.maxDets[2])  # maxDets=100
-        _summarize_single_iou(0, areaRng='small', maxDets=coco_eval_iou10.params.maxDets[2])
-        _summarize_single_iou(0, areaRng='medium', maxDets=coco_eval_iou10.params.maxDets[2])
-        _summarize_single_iou(0, areaRng='large', maxDets=coco_eval_iou10.params.maxDets[2])
+        # Initialize stats list to store the computed metrics
+        stats = []
+        
+        # AP metrics (similar to standard COCO: AP, AP50, AP75, APs, APm, APl)
+        # For IoU@0.1: AP@0.1, APs@0.1, APm@0.1, APl@0.1
+        stats.append(_summarize_single_iou(1, areaRng='all', maxDets=coco_eval_iou10.params.maxDets[2]))    # AP@0.1
+        stats.append(_summarize_single_iou(1, areaRng='small', maxDets=coco_eval_iou10.params.maxDets[2]))  # APs@0.1
+        stats.append(_summarize_single_iou(1, areaRng='medium', maxDets=coco_eval_iou10.params.maxDets[2])) # APm@0.1
+        stats.append(_summarize_single_iou(1, areaRng='large', maxDets=coco_eval_iou10.params.maxDets[2]))  # APl@0.1
+        
+        # AR metrics (similar to standard COCO: AR1, AR10, AR100, ARs, ARm, ARl)
+        # For IoU@0.1: AR1@0.1, AR10@0.1, AR100@0.1
+        stats.append(_summarize_single_iou(0, areaRng='all', maxDets=coco_eval_iou10.params.maxDets[0]))    # AR1@0.1
+        stats.append(_summarize_single_iou(0, areaRng='all', maxDets=coco_eval_iou10.params.maxDets[1]))    # AR10@0.1
+        stats.append(_summarize_single_iou(0, areaRng='all', maxDets=coco_eval_iou10.params.maxDets[2]))    # AR100@0.1
+        
+        # Store the computed stats in the evaluator for logging
+        coco_eval_iou10.stats = stats
 
     def prepare(self, predictions, iou_type):
         if iou_type == "bbox":
